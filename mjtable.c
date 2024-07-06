@@ -2,6 +2,7 @@
 
 #include<string.h>
 #include<stddef.h>
+#include<assert.h>
 
 #if NUM_TILE_EACHKIND > 4
 #error Ankan or kakan problem
@@ -9,6 +10,43 @@
 
 static char CanWinDefault(struct mjtable const*t, unsigned char who, void*context) { return 0; }
 static char CanReadyDefault(struct mjtable const*t, unsigned char who, void*context) { return 0; }
+
+static mjtile FindTile(char const handtile[NUM_TILE_TOTAL], mjkind kind) {
+	mjtile tile = MjUnbuffKind(kind) * NUM_TILE_EACHKIND;
+	if (tile >= NUM_TILE_TOTAL) return assert(0), tile;
+	while (!handtile[tile]) {
+		++tile;
+		if (tile >= NUM_TILE_TOTAL) return assert(0), MjUnbuffKind(kind) * NUM_TILE_EACHKIND;
+	}
+	assert(MjBuffKind(tile / NUM_TILE_EACHKIND) == kind);
+	return tile;
+}
+
+static void RemoveTile(char handtile[NUM_TILE_TOTAL], mjtile*linkF, mjtile*linkB, mjkind kind, unsigned count, mjtile*tilesLastMeld) {
+	if (count > 0) {
+		mjtile tile = MjUnbuffKind(kind) * NUM_TILE_EACHKIND;
+		if (tile >= NUM_TILE_TOTAL) return assert(0);
+		if (handtile[tile]) {
+			count -= 1;
+			handtile[tile] = 0;
+			linkF[linkB[linkF[tile]] = linkB[tile]] = linkF[tile];
+			*tilesLastMeld = tile;
+			++tilesLastMeld;
+		}
+		while (count > 0) {
+			++tile;
+			if (tile >= NUM_TILE_TOTAL) return assert(0);
+			if (handtile[tile]) {
+				count -= 1;
+				handtile[tile] = 0;
+				linkF[linkB[linkF[tile]] = linkB[tile]] = linkF[tile];
+				*tilesLastMeld = tile;
+				++tilesLastMeld;
+			}
+		}
+		assert(MjBuffKind(tile / NUM_TILE_EACHKIND) == kind);
+	}
+}
 
 void MjtableInit(
 	struct mjtable*t,
@@ -144,76 +182,64 @@ void MjtableNewround(struct mjtable*t) {
 		t->mount[NUM_TILE_TOTAL] = t->mount[NUM_TILE_TOTAL - 1];
 #endif
 
-#ifdef MJTABLE_PRESERVE_TILE
 	for (int i = 0; i < NUM_MJPLAYER; ++i) {
-		memcpy(t->handsTile + i, t->mount + i * NUM_TILE_IN_HAND, NUM_TILE_IN_HAND);
-		MjhtreeInit(t->handsTree + i, t->handsTile[i]);
-		for (int j = 0; j < NUM_TILE_IN_HAND; ++j)
-			t->hands[(t->player + i) % NUM_MJPLAYER][MjBuffKind(t->mount[i * NUM_TILE_IN_HAND + j] / NUM_TILE_EACHKIND)] += 1;
+		unsigned char const player = (t->player + i) % NUM_MJPLAYER;
+        mjtile*const linkF = t->handtileLinkF[player];
+        mjtile*const linkB = t->handtileLinkB[player];
+        linkF[NUM_TILE_TOTAL] = NUM_TILE_TOTAL;
+        linkB[NUM_TILE_TOTAL] = NUM_TILE_TOTAL;
+		for (int j = 0; j < NUM_TILE_IN_HAND; ++j) {
+			mjtile const tile = t->mount[i * NUM_TILE_IN_HAND + j];
+			t->hands[player][MjBuffKind(tile / NUM_TILE_EACHKIND)] += 1;
+			t->handtiles[player][tile] = 1;
+            linkB[NUM_TILE_TOTAL] = linkF[linkB[tile] = linkB[linkF[tile] = NUM_TILE_TOTAL]] = tile;
+		}
 	}
 	t->kindFocus = MjBuffKind((t->tileFocus = t->mount[NUM_TILE_IN_HAND * NUM_MJPLAYER]) / NUM_TILE_EACHKIND);
-#else
-	for (int i = 0; i < NUM_MJPLAYER; ++i) {
-		for (int j = 0; j < NUM_TILE_IN_HAND; ++j)
-			t->hands[(t->player + i) % NUM_MJPLAYER][MjBuffKind(t->mount[i * NUM_TILE_IN_HAND + j] / NUM_TILE_EACHKIND)] += 1;
-	}
-	t->kindFocus = MjBuffKind(t->mount[NUM_TILE_IN_HAND * NUM_MJPLAYER] / NUM_TILE_EACHKIND);
-#endif
 
 	t->state = MJS_DRAW;
 	MjtableOptionSelf(t);
 }
 
 void MjtableDiscard(struct mjtable*t, mjkind kind) {
-	numkind*const hand_player = t->hands[t->player];
-#ifdef MJTABLE_PRESERVE_TILE
+	unsigned char const player = t->player;
+	numkind*const hand_player = t->hands[player];
 	if (hand_player[kind] > 0) {
-		unsigned char const index = MjhtreeFindKind(&t->handsTree[t->player], kind);
-		mjtile tileReal = t->handsTile[t->player][index];
+		char*const handtile_player = t->handtiles[player];
+		mjtile*const linkF = t->handtileLinkF[player];
+		mjtile*const linkB = t->handtileLinkB[player];
+		mjtile const tile = FindTile(handtile_player, kind);
 		hand_player[kind] -= 1;
-		t->handsTile[t->player][index] = t->tileFocus;
+		handtile_player[tile] = 0;
+        linkF[linkB[linkF[tile]] = linkB[tile]] = linkF[tile];
 		if (t->state == MJS_DRAW) {
 			hand_player[t->kindFocus] += 1;
-			MjhtreeUpdate(t->handsTree + t->player, index);
+			handtile_player[t->tileFocus] = 1;
+            linkB[NUM_TILE_TOTAL] = linkF[linkB[t->tileFocus] = linkB[linkF[t->tileFocus] = NUM_TILE_TOTAL]] = t->tileFocus;
 		}
-		else MjhtreeDelete(t->handsTree + t->player, index);
-
-		t->tileFocus = tileReal;
 		t->kindFocus = kind;
-	}
-	else if (t->state == MJS_CHIPON) {
-		unsigned char const index = t->handsTree[t->player].child[NUM_TILE_IN_HAND][0];
-		if (index != NUM_TILE_IN_HAND) {
-			t->handsTile[t->player][index] = t->tileFocus;
-			MjhtreeDelete(t->handsTree + t->player, index);
-			t->kindFocus = MjBuffKind((t->tileFocus = t->handsTile[t->player][index]) / NUM_TILE_EACHKIND);
-			hand_player[t->kindFocus] -= 1;
-		}
-		else {
-			t->state = MJS_N;
-			return;
-		}
-	}
-#else
-	if (hand_player[kind] > 0) {
-		hand_player[kind] -= 1;
-		if (t->state == MJS_DRAW) hand_player[t->kindFocus] += 1;
-		t->kindFocus = kind;
+		t->tileFocus = tile;
 	}
 	else if (t->state == MJS_CHIPON) {
 		char success = 0;
 		for (int i = KIND_FIRSTFLOWER; i >= 0; --i) {
+			char*const handtile_player = t->handtiles[player];
+			mjtile*const linkF = t->handtileLinkF[player];
+			mjtile*const linkB = t->handtileLinkB[player];
 			mjkind const k_sch = MjBuffKind(i);
 			if (hand_player[k_sch] > 0) {
+				mjtile const tile = FindTile(handtile_player, k_sch);
 				success = 1;
 				hand_player[k_sch] -= 1;
+				handtile_player[tile] = 0;
+                linkF[linkB[linkF[tile]] = linkB[tile]] = linkF[tile];
 				t->kindFocus = k_sch;
+				t->tileFocus = tile;
 				break;
 			}
 		}
 		if (!success) return (void)(t->state = MJS_N);
 	}
-#endif
 	t->state = MJS_DISCARD;
 	MjtableOptionOther(t);
 }
@@ -246,11 +272,7 @@ void MjtablePass(struct mjtable*t) {
 		return;
 	}
 
-#ifdef MJTABLE_PRESERVE_TILE
 	t->kindFocus = MjBuffKind((t->tileFocus = tile_drawn) / NUM_TILE_EACHKIND);
-#else
-	t->kindFocus = MjBuffKind(tile_drawn / NUM_TILE_EACHKIND);
-#endif
 
 	t->state = MJS_DRAW;
 	MjtableOptionSelf(t);
@@ -306,39 +328,36 @@ void MjtableReady(struct mjtable*t) {
 }
 
 void MjtableChi(struct mjtable*t, int type) {
-	numkind*const hand_player_next = t->hands[t->player = (t->player + 1) % NUM_MJPLAYER];
-#ifdef MJTABLE_PRESERVE_TILE
+	unsigned char const player_next = t->player = (t->player + 1) % NUM_MJPLAYER;
+	numkind*const hand_player_next = t->hands[player_next];
+	char*const handtile_player_next = t->handtiles[player_next];
+	mjkind kind1, kind2;
 	switch (type) {
+	default: assert(0); return;
 	case 0:
-		hand_player_next[t->kindFocus + 1] -= 1;
-		hand_player_next[t->kindFocus + 2] -= 1;
-		MjhtreeDelete(t->handsTree + t->player, MjhtreeFindKind(t->handsTree + t->player, t->kindFocus + 1));
-		MjhtreeDelete(t->handsTree + t->player, MjhtreeFindKind(t->handsTree + t->player, t->kindFocus + 2));
+		kind1 = t->kindFocus + 1;
+		kind2 = t->kindFocus + 2;
 		hand_player_next[t->kindFocus + 1 + NUM_KIND_BUFFED * 2] += 1;
 		break;
-	default:
 	case 1:
-		hand_player_next[t->kindFocus - 1] -= 1;
-		hand_player_next[t->kindFocus + 1] -= 1;
-		MjhtreeDelete(t->handsTree + t->player, MjhtreeFindKind(t->handsTree + t->player, t->kindFocus - 1));
-		MjhtreeDelete(t->handsTree + t->player, MjhtreeFindKind(t->handsTree + t->player, t->kindFocus + 1));
+		kind1 = t->kindFocus - 1;
+		kind2 = t->kindFocus + 1;
 		hand_player_next[t->kindFocus + NUM_KIND_BUFFED * 2] += 1;
 		break;
 	case 2:
-		hand_player_next[t->kindFocus - 2] -= 1;
-		hand_player_next[t->kindFocus - 1] -= 1;
-		MjhtreeDelete(t->handsTree + t->player, MjhtreeFindKind(t->handsTree + t->player, t->kindFocus - 2));
-		MjhtreeDelete(t->handsTree + t->player, MjhtreeFindKind(t->handsTree + t->player, t->kindFocus - 1));
+		kind1 = t->kindFocus - 2;
+		kind2 = t->kindFocus - 1;
 		hand_player_next[t->kindFocus - 1 + NUM_KIND_BUFFED * 2] += 1;
 		break;
 	}
-#else
-	hand_player_next[t->kindFocus] += 1;
-	hand_player_next[t->kindFocus - type] -= 1;
-	hand_player_next[t->kindFocus - type + 1] -= 1;
-	hand_player_next[t->kindFocus - type + 2] -= 1;
-	hand_player_next[t->kindFocus - type + 1 + NUM_KIND_BUFFED * 2] += 1;
-#endif
+	hand_player_next[kind1] -= 1;
+	hand_player_next[kind2] -= 1;
+	{
+		mjtile*const linkF = t->handtileLinkF[player_next];
+		mjtile*const linkB = t->handtileLinkB[player_next];
+		RemoveTile(handtile_player_next, linkF, linkB, kind1, 1, t->tilesLastMeld);
+		RemoveTile(handtile_player_next, linkF, linkB, kind2, 1, t->tilesLastMeld + 1);
+	}
 
 	t->meld[t->player] += 1;
 	t->state = MJS_CHIPON;
@@ -346,27 +365,22 @@ void MjtableChi(struct mjtable*t, int type) {
 }
 
 void MjtablePon(struct mjtable*t, int who) {
-	numkind*const hand_player_next = t->hands[t->player = (t->player + who + 1) % NUM_MJPLAYER];
+	unsigned char const player_next = t->player = (t->player + who + 1) % NUM_MJPLAYER;
+	numkind*const hand_player_next = t->hands[player_next];
 	hand_player_next[t->kindFocus] -= 2;
 	hand_player_next[t->kindFocus + NUM_KIND_BUFFED] += 1;
-#ifdef MJTABLE_PRESERVE_TILE
-	MjhtreeDelete(t->handsTree + t->player, MjhtreeFindKind(t->handsTree + t->player, t->kindFocus));
-	MjhtreeDelete(t->handsTree + t->player, MjhtreeFindKind(t->handsTree + t->player, t->kindFocus));
-#endif
+	RemoveTile(t->handtiles[player_next], t->handtileLinkF[player_next], t->handtileLinkB[player_next], t->kindFocus, 2, t->tilesLastMeld);
 	t->meld[t->player] += 1;
 	t->state = MJS_CHIPON;
 	MjtableOptionSelf(t);
 }
 
 void MjtableKanOther(struct mjtable*t, int who) {
-	numkind*const hand_player_next = t->hands[t->player = (t->player + who + 1) % NUM_MJPLAYER];
+	unsigned char const player_next = t->player = (t->player + who + 1) % NUM_MJPLAYER;
+	numkind*const hand_player_next = t->hands[player_next];
 	hand_player_next[t->kindFocus] -= 3;
 	hand_player_next[t->kindFocus + NUM_KIND_BUFFED] += 1;
-#ifdef MJTABLE_PRESERVE_TILE
-	MjhtreeDelete(t->handsTree + t->player, MjhtreeFindKind(t->handsTree + t->player, t->kindFocus));
-	MjhtreeDelete(t->handsTree + t->player, MjhtreeFindKind(t->handsTree + t->player, t->kindFocus));
-	MjhtreeDelete(t->handsTree + t->player, MjhtreeFindKind(t->handsTree + t->player, t->kindFocus));
-#endif
+	RemoveTile(t->handtiles[player_next], t->handtileLinkF[player_next], t->handtileLinkB[player_next], t->kindFocus, 3, t->tilesLastMeld);
 	t->meld[t->player] += 1;
 	t->quad[t->player] += 1;
 	t->state = MJS_KAN_C;
@@ -374,117 +388,104 @@ void MjtableKanOther(struct mjtable*t, int who) {
 }
 
 void MjtableKanSelf(struct mjtable*t, int which) {
-	numkind*const hand_player = t->hands[t->player];
+	unsigned char const player = t->player;
+	numkind*const hand_player = t->hands[player];
+	char*const handtile_player = t->handtiles[player];
+	mjtile*const linkF = t->handtileLinkF[player];
+	mjtile*const linkB = t->handtileLinkB[player];
 	mjkind const k_kan = t->optionSelf.kanCandidate[which];
 
-	if (t->state == MJS_DRAW) hand_player[t->kindFocus] += 1;
+	if (t->state == MJS_DRAW) {
+		hand_player[t->kindFocus] += 1;
+		handtile_player[t->tileFocus] = 1;
+		linkB[NUM_TILE_TOTAL] = linkF[linkB[t->tileFocus] = linkB[linkF[t->tileFocus] = NUM_TILE_TOTAL]] = t->tileFocus;
+	}
 	if (hand_player[k_kan + NUM_KIND_BUFFED] > 0) {
-#ifdef MJTABLE_PRESERVE_TILE
-		unsigned char const index = MjhtreeFindKind(t->handsTree + t->player, k_kan);
-		if (index != NUM_TILE_IN_HAND) {
-			mjtile const tile_focus = t->handsTile[t->player][index];
-			t->handsTile[t->player][index] = t->tileFocus;
-			t->tileFocus = tile_focus;
-			MjhtreeUpdate(t->handsTree + t->player, index);
-		}
-#endif
+		mjtile tile = FindTile(handtile_player, k_kan);
 		hand_player[k_kan] -= 1;
+		handtile_player[tile] = 0;
+		linkF[linkB[linkF[tile]] = linkB[tile]] = linkF[tile];
+		t->kindFocus = k_kan;
+		t->tileFocus = tile;
 		t->state = MJS_KAN_R;
 	}
 	else {
-#ifdef MJTABLE_PRESERVE_TILE
-		unsigned char index;
-		MjhtreeDelete(t->handsTree + t->player, MjhtreeFindKind(t->handsTree + t->player, k_kan));
-		MjhtreeDelete(t->handsTree + t->player, MjhtreeFindKind(t->handsTree + t->player, k_kan));
-		MjhtreeDelete(t->handsTree + t->player, MjhtreeFindKind(t->handsTree + t->player, k_kan));
-		index = MjhtreeFindKind(t->handsTree + t->player, k_kan);
-		if (index != NUM_TILE_IN_HAND) {
-			mjtile const tile_focus = t->handsTile[t->player][index];
-			t->handsTile[t->player][index] = t->tileFocus;
-			t->tileFocus = tile_focus;
-			MjhtreeUpdate(t->handsTree + t->player, index);
-		}
-#endif
+		mjtile tile = FindTile(handtile_player, k_kan);
 		hand_player[k_kan] -= 4;
+		RemoveTile(handtile_player, t->handtileLinkF[player], t->handtileLinkB[player], k_kan, 4, t->tilesLastMeld);
 		hand_player[k_kan + NUM_KIND_BUFFED] += 1;
 		t->meld[t->player] += 1;
+		t->kindFocus = k_kan;
+		t->tileFocus = tile;
 		t->state = MJS_KAN_C;
 	}
 
 	t->quad[t->player] += 1;
-	t->kindFocus = k_kan;
 	MjtableOptionOther(t);
 }
 
 void MjtableFlower(struct mjtable*t) {
-#ifdef MJTABLE_PRESERVE_TILE
-	unsigned char const index = MjhtreeFindKind(t->handsTree + t->player, KIND_FLOWER_BUFFED);
-	if (index != NUM_TILE_IN_HAND) {
-		mjtile const tile_focus = t->handsTile[t->player][index];
-		t->handsTile[t->player][index] = t->tileFocus;
-		t->tileFocus = tile_focus;
-		MjhtreeUpdate(t->handsTree + t->player, index);
+	unsigned char const player = t->player;
+	numkind*const hand = t->hands[player];
+	char*const handtile = t->handtiles[player];
+	mjtile*const linkF = t->handtileLinkF[player];
+	mjtile*const linkB = t->handtileLinkB[player];
+	if (t->state == MJS_DRAW) {
+		hand[t->kindFocus] += 1;
+		handtile[t->tileFocus] = 1;
+		linkB[NUM_TILE_TOTAL] = linkF[linkB[t->tileFocus] = linkB[linkF[t->tileFocus] = NUM_TILE_TOTAL]] = t->tileFocus;
 	}
-#endif
-	if (t->state == MJS_DRAW) t->hands[t->player][t->kindFocus] += 1;
-	t->hands[t->player][KIND_FLOWER_BUFFED] -= 1;
+	hand[KIND_FLOWER_BUFFED] -= 1;
 	t->flower[t->player] += 1;
 	t->kindFocus = KIND_FLOWER_BUFFED;
+	{
+		mjtile const tile = FindTile(handtile, KIND_FLOWER_BUFFED);
+		handtile[tile] = 0;
+		linkF[linkB[linkF[tile]] = linkB[tile]] = linkF[tile];
+		t->tileFocus = tile;
+	}
 	t->state = MJS_KAN_R;
 	MjtableOptionOther(t);
 }
 
 void MjtableDiscardT(struct mjtable*t, mjtile tile) {
-	numkind*const hand_player = t->hands[t->player];
-#ifdef MJTABLE_PRESERVE_TILE
-	unsigned char index = MjhtreeFindTile(&t->handsTree[t->player], tile);
-	if (index != NUM_TILE_IN_HAND) {
-		mjkind kind_real = MjBuffKind(tile / NUM_TILE_EACHKIND);
-		hand_player[kind_real] -= 1;
-		t->handsTile[t->player][index] = t->tileFocus;
+	unsigned char const player = t->player;
+	numkind*const hand_player = t->hands[player];
+	char*const handtile = t->handtiles[player];
+	if (handtile[tile]) {
+		mjtile*const linkF = t->handtileLinkF[player];
+		mjtile*const linkB = t->handtileLinkB[player];
+		mjkind const kind = MjBuffKind(tile / NUM_TILE_EACHKIND);
+		hand_player[kind] -= 1;
+		handtile[tile] = 0;
+		linkF[linkB[linkF[tile]] = linkB[tile]] = linkF[tile];
 		if (t->state == MJS_DRAW) {
 			hand_player[t->kindFocus] += 1;
-			MjhtreeUpdate(t->handsTree + t->player, index);
+			handtile[t->tileFocus] = 1;
+			linkB[NUM_TILE_TOTAL] = linkF[linkB[t->tileFocus] = linkB[linkF[t->tileFocus] = NUM_TILE_TOTAL]] = t->tileFocus;
 		}
-		else MjhtreeDelete(t->handsTree + t->player, index);
-
-		t->tileFocus = tile;
-		t->kindFocus = kind_real;
-	}
-	else if (t->state == MJS_CHIPON) {
-		index = t->handsTree[t->player].child[NUM_TILE_IN_HAND][0];
-		if (index != NUM_TILE_IN_HAND) {
-			t->handsTile[t->player][index] = t->tileFocus;
-			MjhtreeDelete(t->handsTree + t->player, index);
-			t->kindFocus = MjBuffKind((t->tileFocus = t->handsTile[t->player][index]) / NUM_TILE_EACHKIND);
-			hand_player[t->kindFocus] -= 1;
-		}
-		else {
-			t->state = MJS_N;
-			return;
-		}
-	}
-#else
-	mjkind const kind = MjBuffKind(tile / NUM_TILE_EACHKIND);
-	if (hand_player[kind] > 0) {
-		hand_player[kind] -= 1;
-		if (t->state == MJS_DRAW) hand_player[t->kindFocus] += 1;
 		t->kindFocus = kind;
+		t->tileFocus = tile;
 	}
 	else if (t->state == MJS_CHIPON) {
 		char success = 0;
 		for (int i = KIND_FIRSTFLOWER; i >= 0; --i) {
+			mjtile*const linkF = t->handtileLinkF[player];
+			mjtile*const linkB = t->handtileLinkB[player];
 			mjkind const k_sch = MjBuffKind(i);
 			if (hand_player[k_sch] > 0) {
+				mjtile const tile_real = FindTile(handtile, k_sch);
 				success = 1;
 				hand_player[k_sch] -= 1;
+				handtile[tile_real] = 0;
+				linkF[linkB[linkF[tile_real]] = linkB[tile_real]] = linkF[tile_real];
 				t->kindFocus = k_sch;
+				t->tileFocus = tile_real;
 				break;
 			}
 		}
 		if (!success) return (void)(t->state = MJS_N);
 	}
-#endif
 	t->state = MJS_DISCARD;
 	MjtableOptionOther(t);
 }

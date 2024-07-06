@@ -2,9 +2,6 @@
 #define MJTABLE_H
 
 #include"mahjong.h"
-#ifdef MJTABLE_PRESERVE_TILE
-#include"mjhtree.h"
-#endif
 
 enum mjtablestate {
 	MJS_N,
@@ -17,10 +14,14 @@ enum mjtablestate {
 
 struct mjtable {
 	mjhand hands[NUM_MJPLAYER];
+	char handtiles[NUM_MJPLAYER][NUM_TILE_TOTAL];
 	char ready[NUM_MJPLAYER];
 	unsigned char meld[NUM_MJPLAYER];
 	unsigned char quad[NUM_MJPLAYER];
 	unsigned char flower[NUM_MJPLAYER];
+
+	mjtile handtileLinkF[NUM_MJPLAYER][NUM_TILE_TOTAL + 1];
+	mjtile handtileLinkB[NUM_MJPLAYER][NUM_TILE_TOTAL + 1];
 
 	enum mjtablestate state;
 	mjtile posFront, posBack;
@@ -48,11 +49,8 @@ struct mjtable {
 
 	mjtile mount[NUM_TILE_TOTAL + NUM_TILE_TOTAL % 2U];
 	mjkind kindFocus;
-#ifdef MJTABLE_PRESERVE_TILE
 	mjtile tileFocus;
-	mjtile handsTile[NUM_MJPLAYER][NUM_TILE_IN_HAND];
-	struct mjhtree handsTree[NUM_MJPLAYER];
-#endif
+	mjtile tilesLastMeld[4];
 };
 
 void MjtableInit(
